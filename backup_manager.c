@@ -1,3 +1,5 @@
+#define _XOPEN_SOURCE 700
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -477,55 +479,72 @@ void safe_path_join(char *dest, size_t dest_size, const char *dir, const char *n
 }
 
 int is_target_inside_source(const char *source, const char *target) {
-    char *real_source = realpath(source, NULL);
-    if (real_source == NULL) {
-        return 0; 
+    char real_source[PATH_MAX];
+    char real_target[PATH_MAX];
+
+    // Пробуем получить абсолютный путь к source
+    if (realpath(source, real_source) == NULL) {
+        // Если не смогли — просто отказываемся от проверки
+        return 0;
     }
-    
+
+    // Копируем target во временный буфер
     char target_copy[MAX_PATH_LEN];
     strncpy(target_copy, target, MAX_PATH_LEN - 1);
     target_copy[MAX_PATH_LEN - 1] = '\0';
-    
-    char *real_target = NULL;
-    char *target_parent = NULL;
-    
-    real_target = realpath(target, NULL);
-    
-    if (real_target == NULL) {
+
+    // Сначала пробуем realpath прямо для target
+    if (realpath(target_copy, real_target) == NULL) {
+        // Если target ещё не существует, попробуем его родительский каталог
         char *last_slash = strrchr(target_copy, '/');
-        if (last_slash != NULL) {
-            *last_slash = '\0';
-            target_parent = realpath(target_copy, NULL);
-            if (target_parent != NULL) {
-                size_t parent_len = strlen(target_parent);
-                size_t name_len = strlen(last_slash + 1);
-                real_target = malloc(parent_len + name_len + 2);
-                if (real_target != NULL) {
-                    snprintf(real_target, parent_len + name_len + 2, "%s/%s", target_parent, last_slash + 1);
-                }
-                free(target_parent);
-            }
+        if (last_slash == NULL) {
+            // Нет слэша — родителя нормального нет, считаем что всё ок
+            return 0;
         }
-    }
-    
-    int result = 0;
-    if (real_target != NULL) {
-        size_t source_len = strlen(real_source);
-        size_t target_len = strlen(real_target);
-        
-        if (target_len >= source_len) {
-            if (strncmp(real_target, real_source, source_len) == 0) {
-                if (target_len == source_len || real_target[source_len] == '/') {
-                    result = 1;
-                }
-            }
+
+        char name_part[MAX_PATH_LEN];
+        strncpy(name_part, last_slash + 1, MAX_PATH_LEN - 1);
+        name_part[MAX_PATH_LEN - 1] = '\0';
+
+        *last_slash = '\0'; // временно отрезаем имя файла / подкаталога
+
+        char real_parent[PATH_MAX];
+        if (realpath(target_copy, real_parent) == NULL) {
+            // Не смогли получить realpath для родителя — тогда уж не считаем это ошибкой
+            return 0;
         }
+
+        // Собираем "предполагаемый" полный путь к target поверх real_parent
+        size_t parent_len = strlen(real_parent);
+        if (parent_len + 1 + strlen(name_part) + 1 > sizeof(real_target)) {
+            // Слишком длинный путь — считаем, что не внутри
+            return 0;
+        }
+
+        snprintf(real_target, sizeof(real_target), "%s/%s", real_parent, name_part);
     }
-    
-    free(real_source);
-    if (real_target) free(real_target);
-    return result;
+
+    // Теперь у нас есть real_source и real_target — оба абсолютные пути
+    size_t source_len = strlen(real_source);
+    size_t target_len = strlen(real_target);
+
+    // Проверяем: target совпадает с source или лежит внутри него
+    if (target_len < source_len) {
+        return 0;
+    }
+
+    if (strncmp(real_source, real_target, source_len) != 0) {
+        return 0;
+    }
+
+    // Либо точное совпадение, либо дальше идёт '/'
+    if (target_len == source_len) {
+        return 1;
+    }
+
+    return (real_target[source_len] == '/');
 }
+
 
 int create_backup(const char *source, char targets[][MAX_PATH_LEN], int target_count) {
     if (!path_exists(source)) {
