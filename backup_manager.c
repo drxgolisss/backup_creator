@@ -47,8 +47,8 @@ void handle_signal(int sig);
 void setup_signal_handlers(void);
 int parse_command(char *command, char **args);
 int create_directory_recursive(const char *path);
-int copy_file(const char *src, const char *dest);
-int copy_directory_recursive(const char *src, const char *dest);
+int copy_file(const char *src, const char *dest, const char *source_base, const char *target_base);
+int copy_directory_recursive(const char *src, const char *dest, const char *source_base, const char *target_base);
 int remove_directory_recursive(const char *path);
 int create_backup(const char *source, char targets[][MAX_PATH_LEN], int target_count);
 void monitor_directory(const char *source, const char *target);
@@ -217,10 +217,8 @@ int parse_command(char *command, char **args) {
         
         char *start = p;
         int len = 0;
-        int in_quotes = 0;
         
         if (*p == '"') {
-            in_quotes = 1;
             p++; 
             start = p;
             
@@ -232,8 +230,7 @@ int parse_command(char *command, char **args) {
                 len++;
             }
             
-            if (*p == '"') {
-            }
+            
         } else {
             while (*p && *p != ' ' && *p != '\t') {
                 p++;
@@ -294,7 +291,7 @@ int create_directory_recursive(const char *path) {
     return 0;
 }
 
-int copy_file(const char *src, const char *dest) {
+int copy_file(const char *src, const char *dest, const char *source_base, const char *target_base) {
     int src_fd, dest_fd;
     char buffer[4096];
     ssize_t bytes_read, bytes_written;
@@ -312,11 +309,40 @@ int copy_file(const char *src, const char *dest) {
             perror("readlink");
             return -1;
         }
-        link_target[link_len] = '\0';
+        // Check if symlink target is an absolute path pointing to source directory
+        char *adjusted_target = link_target;
+        char new_target[MAX_PATH_LEN];
+        
+        if (link_target[0] == '/' && source_base != NULL && target_base != NULL) {
+            // Absolute path - check if it points to source directory
+            char *real_source = realpath(source_base, NULL);
+            char *real_link = realpath(link_target, NULL);
+            
+            if (real_source != NULL && real_link != NULL) {
+                size_t source_len = strlen(real_source);
+                // Check if link target is inside source directory
+                if (strncmp(real_link, real_source, source_len) == 0 && 
+                    (real_link[source_len] == '\0' || real_link[source_len] == '/')) {
+                    // Link points to source directory - adjust to point to target
+                    const char *rel_path = real_link + source_len;
+                    if (*rel_path == '/') rel_path++;
+                    
+                    if (strlen(rel_path) > 0) {
+                        snprintf(new_target, sizeof(new_target), "%s/%s", target_base, rel_path);
+                    } else {
+                        snprintf(new_target, sizeof(new_target), "%s", target_base);
+                    }
+                    adjusted_target = new_target;
+                }
+            }
+            
+            if (real_source) free(real_source);
+            if (real_link) free(real_link);
+        }
         
         unlink(dest);
         
-        if (symlink(link_target, dest) != 0) {
+        if (symlink(adjusted_target, dest) != 0) {
             perror("symlink");
             return -1;
         }
@@ -358,7 +384,7 @@ int copy_file(const char *src, const char *dest) {
     return 0;
 }
 
-int copy_directory_recursive(const char *src, const char *dest) {
+    int copy_directory_recursive(const char *src, const char *dest, const char *source_base, const char *target_base) {
     DIR *dir;
     struct dirent *entry;
     struct stat statbuf;
@@ -390,13 +416,13 @@ int copy_directory_recursive(const char *src, const char *dest) {
         }
         
         if (S_ISDIR(statbuf.st_mode)) {
-            if (copy_directory_recursive(src_path, dest_path) != 0) {
+            if (copy_directory_recursive(src_path, dest_path, source_base, target_base) != 0) {
                 printf("Error: Failed to copy subdirectory %s to %s\n", src_path, dest_path);
                 closedir(dir);
                 return -1;
             }
         } else {
-            if (copy_file(src_path, dest_path) != 0) {
+            if (copy_file(src_path, dest_path, source_base, target_base) != 0) {
                 printf("Warning: Could not copy file %s to %s: %s\n", 
                        src_path, dest_path, strerror(errno));
             }
@@ -626,7 +652,7 @@ int create_backup(const char *source, char targets[][MAX_PATH_LEN], int target_c
     printf("Creating initial backup...\n");
     for (int i = 0; i < target_count; i++) {
         printf("Copying to %s...\n", targets[i]);
-        if (copy_directory_recursive(source, targets[i]) != 0) {
+        if (copy_directory_recursive(source, targets[i], source, targets[i]) != 0) {
             printf("Error: Failed to create backup in %s\n", targets[i]);
             return -1;
         }
@@ -708,7 +734,7 @@ void monitor_directory(const char *source, const char *target) {
                     if (event->mask & IN_CREATE) {
                         printf("File created: %s\n", src_path);
                         if (event->mask & IN_ISDIR) {
-                            if (copy_directory_recursive(src_path, dest_path) != 0) {
+                            if (copy_directory_recursive(src_path, dest_path, source, target) != 0) {
                                 printf("Warning: Failed to copy directory %s\n", src_path);
                             }
                             if (watch_count < MAX_WATCHES) {
@@ -727,7 +753,7 @@ void monitor_directory(const char *source, const char *target) {
                                 printf("Warning: Cannot add more watches (limit reached)\n");
                             }
                         } else {
-                            if (copy_file(src_path, dest_path) != 0) {
+                            if (copy_file(src_path, dest_path, source, target) != 0) {
                                 printf("Warning: Failed to copy file %s\n", src_path);
                             }
                         }
@@ -748,7 +774,7 @@ void monitor_directory(const char *source, const char *target) {
                     else if (event->mask & IN_MODIFY) {
                         printf("File modified: %s\n", src_path);
                         if (!(event->mask & IN_ISDIR)) {
-                            if (copy_file(src_path, dest_path) != 0) {
+                            if (copy_file(src_path, dest_path, source, target) != 0) {
                                 printf("Warning: Failed to update file %s\n", src_path);
                             }
                         }
@@ -769,11 +795,11 @@ void monitor_directory(const char *source, const char *target) {
                     else if (event->mask & IN_MOVED_TO) {
                         printf("File moved to: %s\n", src_path);
                         if (event->mask & IN_ISDIR) {
-                            if (copy_directory_recursive(src_path, dest_path) != 0) {
+                            if (copy_directory_recursive(src_path, dest_path, source, target) != 0) {
                                 printf("Warning: Failed to copy moved directory %s\n", src_path);
                             }
                         } else {
-                            if (copy_file(src_path, dest_path) != 0) {
+                            if (copy_file(src_path, dest_path, source, target) != 0) {
                                 printf("Warning: Failed to copy moved file %s\n", src_path);
                             }
                         }
@@ -953,7 +979,7 @@ int sync_directories(const char *backup_dir, const char *original_dir) {
         } else {
             if (!path_exists(original_path) || !files_are_same(backup_path, original_path)) {
                 printf("Restoring: %s\n", original_path);
-                if (copy_file(backup_path, original_path) != 0) {
+                if (copy_file(backup_path, original_path, NULL, NULL) != 0) {
                     printf("Warning: Failed to restore file %s\n", original_path);
                 }
             }
