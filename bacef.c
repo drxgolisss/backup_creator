@@ -28,15 +28,13 @@
 #define EVENT_BUF_LEN (EVENTS_PER_READ * (EVENT_SIZE + EVENT_NAME_MAX))
 #define MAX_MOVE_EVENTS 256
 
-#define WATCH_MASK                                                             \
-  (IN_CREATE | IN_DELETE | IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_FROM |        \
-   IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF)
 volatile sig_atomic_t should_exit = 0;
 
 typedef struct {
   int wd;
   char path[MAX_PATH_LEN];
 } watch_info_t;
+
 
 static void update_watch_paths_prefix(watch_info_t *watches, int watch_count,
                                       const char *old_prefix,
@@ -53,21 +51,22 @@ static void update_watch_paths_prefix(watch_info_t *watches, int watch_count,
   }
 }
 
-static int ensure_parent_dirs(const char *path) {
-  char tmp[MAX_PATH_LEN];
-  snprintf(tmp, sizeof(tmp), "%s", path);
 
-  for (char *p = tmp + 1; *p; p++) {
-    if (*p == '/') {
-      *p = '\0';
-      if (mkdir(tmp, 0755) < 0 && errno != EEXIST) {
-        return -1;
+    static int ensure_parent_dirs(const char *path) {
+      char tmp[MAX_PATH_LEN];
+      snprintf(tmp, sizeof(tmp), "%s", path);
+
+      for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+          *p = '\0';
+          if (mkdir(tmp, 0755) < 0 && errno != EEXIST) {
+            return -1;
+          }
+          *p = '/';
+        }
       }
-      *p = '/';
+      return 0;
     }
-  }
-  return 0;
-}
 
 typedef struct {
   char source_path[MAX_PATH_LEN];
@@ -231,6 +230,7 @@ int main(void) {
     }
   }
 
+
   cleanup_resources();
   printf("Backup manager exited\n");
   return 0;
@@ -270,96 +270,76 @@ void child_signal_handler(int sig) {
   }
 }
 
-static void ignore_other_signals(int is_child) {
-  (void)is_child;
-  struct sigaction ign;
-  memset(&ign, 0, sizeof(ign));
-  ign.sa_handler = SIG_IGN;
-  sigemptyset(&ign.sa_mask);
-  ign.sa_flags = 0;
-
-  const int sigs_to_ignore[] = {SIGHUP,  SIGQUIT, SIGPIPE, SIGALRM,
-                                SIGUSR1, SIGUSR2, SIGTTIN, SIGTTOU};
-
-  for (size_t i = 0; i < sizeof(sigs_to_ignore) / sizeof(sigs_to_ignore[0]);
-       i++) {
-    sigaction(sigs_to_ignore[i], &ign, NULL);
-  }
-}
-
 void setup_signal_handlers(void) {
   struct sigaction sa;
-  memset(&sa, 0, sizeof(sa));
   sa.sa_handler = handle_signal;
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
 
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
-
-  ignore_other_signals(0);
 }
 
 int parse_command(char *command, char **args) {
-  int argc = 0;
-  char *p = command;
+    int argc = 0;
+    char *p = command;
 
-  while (*p && argc < MAX_ARGS - 1) {
-    while (*p && (*p == ' ' || *p == '\t')) {
-      p++;
-    }
-
-    if (!*p)
-      break;
-
-    char *start = p;
-    int len = 0;
-
-    if (*p == '"') {
-      p++;
-      start = p;
-
-      while (*p && (*p != '"' || (p > start && *(p - 1) == '\\'))) {
-        if (*p == '\\' && *(p + 1) == '"') {
-          memmove(p, p + 1, strlen(p));
+    while (*p && argc < MAX_ARGS - 1) {
+        while (*p && (*p == ' ' || *p == '\t')) {
+            p++;
         }
-        p++;
-        len++;
-      }
 
-      if (*p == '"') {
-        p++;
-      }
-    } else {
-      while (*p && *p != ' ' && *p != '\t') {
-        p++;
-        len++;
-      }
+        if (!*p) break;
+
+        char *start = p;
+        int len = 0;
+
+        if (*p == '"') {
+            p++;              
+            start = p;
+
+            while (*p && (*p != '"' || (p > start && *(p - 1) == '\\'))) {
+                if (*p == '\\' && *(p + 1) == '"') {
+                    memmove(p, p + 1, strlen(p));
+                }
+                p++;
+                len++;
+            }
+
+            if (*p == '"') {
+                p++;
+            }
+        } else {
+            while (*p && *p != ' ' && *p != '\t') {
+                p++;
+                len++;
+            }
+        }
+
+        if (len == 0) {
+            continue;
+        }
+
+        args[argc] = malloc(len + 1);
+        if (args[argc] == NULL) {
+            for (int i = 0; i < argc; i++) {
+                free(args[i]);
+            }
+            return 0;
+        }
+
+        strncpy(args[argc], start, len);
+        args[argc][len] = '\0';
+        argc++;
     }
 
-    if (len == 0) {
-      continue;
+    if (*p && argc >= MAX_ARGS - 1) {
+        printf("Warning: Too many arguments, ignoring extras\n");
     }
 
-    args[argc] = malloc(len + 1);
-    if (args[argc] == NULL) {
-      for (int i = 0; i < argc; i++) {
-        free(args[i]);
-      }
-      return 0;
-    }
-
-    strncpy(args[argc], start, len);
-    args[argc][len] = '\0';
-    argc++;
-  }
-
-  if (*p && argc >= MAX_ARGS - 1) {
-    printf("Warning: Too many arguments, ignoring extras\n");
-  }
-
-  return argc;
+    return argc;
 }
+
 
 int create_directory_recursive(const char *path) {
   char tmp[MAX_PATH_LEN];
@@ -409,8 +389,7 @@ int copy_file(const char *src, const char *dest, const char *source_base,
   if (S_ISLNK(src_stat.st_mode)) {
     char link_target[MAX_PATH_LEN];
     ssize_t link_len = readlink(src, link_target, sizeof(link_target) - 1);
-    if (link_len >= 0)
-      link_target[link_len] = '\0';
+    if (link_len >= 0) link_target[link_len] = '\0';
     if (link_len == -1) {
       perror("readlink");
       return -1;
@@ -478,8 +457,7 @@ int copy_file(const char *src, const char *dest, const char *source_base,
     return -1;
   }
 
-  while (!should_exit &&
-         (bytes_read = read(src_fd, buffer, sizeof(buffer))) > 0) {
+  while (!should_exit && (bytes_read = read(src_fd, buffer, sizeof(buffer))) > 0) {
     bytes_written = write(dest_fd, buffer, bytes_read);
     if (bytes_written != bytes_read) {
       perror("write");
@@ -727,10 +705,10 @@ int create_backup(const char *source, char targets[][MAX_PATH_LEN],
 
   for (int i = 0; i < target_count; i++) {
     if (targets[i][0] == '\0') {
-      printf("Error: Empty target path is not allowed\n");
-      return -1;
+        printf("Error: Empty target path is not allowed\n");
+        return -1;
     }
-  }
+}
 
   if (!path_exists(source)) {
     printf("Error: Source path '%s' does not exist\n", source);
@@ -811,33 +789,32 @@ int create_backup(const char *source, char targets[][MAX_PATH_LEN],
     backup->target_paths[i][MAX_PATH_LEN - 1] = '\0';
   }
 
-  for (int i = 0; i < target_count; i++) {
-    pid_t pid = fork();
-    if (pid == 0) {
-      printf("Creating initial backup: %s -> %s (PID: %d)\n", source,
-             targets[i], getpid());
+for (int i = 0; i < target_count; i++) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    printf("Creating initial backup: %s -> %s (PID: %d)\n", source,
+           targets[i], getpid());
 
-      if (copy_directory_recursive(source, targets[i], source, targets[i]) !=
-          0) {
-        printf("Error: Failed to create initial backup in %s\n", targets[i]);
-        exit(1);
-      }
-
-      monitor_directory(source, targets[i]);
-      exit(0);
-    } else if (pid > 0) {
-      backup->monitor_pids[i] = pid;
-    } else {
-      perror("fork");
-      for (int j = 0; j < i; j++) {
-        kill(backup->monitor_pids[j], SIGTERM);
-        waitpid(backup->monitor_pids[j], NULL, 0);
-      }
-      return -1;
+    if (copy_directory_recursive(source, targets[i], source, targets[i]) != 0) {
+      printf("Error: Failed to create initial backup in %s\n", targets[i]);
+      exit(1);
     }
-  }
 
-  backup_count++;
+    monitor_directory(source, targets[i]);
+    exit(0);
+  } else if (pid > 0) {
+    backup->monitor_pids[i] = pid;
+  } else {
+    perror("fork");
+    for (int j = 0; j < i; j++) {
+      kill(backup->monitor_pids[j], SIGTERM);
+      waitpid(backup->monitor_pids[j], NULL, 0);
+    }
+    return -1;
+  }
+}
+
+backup_count++;
   return 0;
 }
 
@@ -858,7 +835,6 @@ void monitor_directory(const char *source, const char *target) {
   sigaction(SIGTERM, &sa_child, NULL);
   sigaction(SIGINT, &sa_child, NULL);
 
-  ignore_other_signals(1);
   printf("Monitoring %s -> %s (PID: %d)\n", source, target, getpid());
 
   inotify_fd = inotify_init();
@@ -887,32 +863,6 @@ void monitor_directory(const char *source, const char *target) {
 
       if (event->mask & IN_IGNORED) {
         remove_watch_entry(watches, &watch_count, event->wd);
-        i += EVENT_SIZE + event->len;
-        continue;
-      }
-
-      if (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF)) {
-        char watch_path_copy[MAX_PATH_LEN];
-        watch_path_copy[0] = '\0';
-
-        for (int j = 0; j < watch_count; j++) {
-          if (watches[j].wd == event->wd) {
-            snprintf(watch_path_copy, sizeof(watch_path_copy), "%s",
-                     watches[j].path);
-            break;
-          }
-        }
-
-        remove_watch_entry(watches, &watch_count, event->wd);
-
-        if (watch_path_copy[0] != '\0') {
-          printf("Directory removed/moved: %s\n", watch_path_copy);
-
-          if (strcmp(watch_path_copy, source) == 0) {
-            should_exit = 1;
-          }
-        }
-
         i += EVENT_SIZE + event->len;
         continue;
       }
@@ -951,11 +901,12 @@ void monitor_directory(const char *source, const char *target) {
               }
               if (watch_count < MAX_WATCHES) {
                 int new_wd =
-                    inotify_add_watch(inotify_fd, src_path, WATCH_MASK);
+                    inotify_add_watch(inotify_fd, src_path,
+                                      IN_CREATE | IN_DELETE | IN_MODIFY |
+                                          IN_MOVED_FROM | IN_MOVED_TO);
                 if (new_wd >= 0) {
                   watches[watch_count].wd = new_wd;
-                  snprintf(watches[watch_count].path, MAX_PATH_LEN, "%s",
-                           src_path);
+                  snprintf(watches[watch_count].path, MAX_PATH_LEN, "%s", src_path);
                   watch_count++;
                 } else {
                   printf(
@@ -982,7 +933,7 @@ void monitor_directory(const char *source, const char *target) {
                        strerror(errno));
               }
             }
-          } else if ((event->mask & (IN_MODIFY | IN_CLOSE_WRITE)) != 0) {
+          } else if (event->mask & IN_MODIFY) {
             printf("File modified: %s\n", src_path);
             if (!(event->mask & IN_ISDIR)) {
               if (copy_file(src_path, dest_path, source, target) != 0) {
@@ -1041,10 +992,10 @@ void monitor_directory(const char *source, const char *target) {
                 printf("Treating as rename inside tree: %s -> %s\n",
                        moves[idx].src_path, src_path);
                 if (event->mask & IN_ISDIR) {
-                  update_watch_paths_prefix(watches, watch_count,
-                                            moves[idx].src_path, src_path);
-                }
-                moves[idx].in_use = 0;
+  update_watch_paths_prefix(watches, watch_count,
+                            moves[idx].src_path, src_path);
+}
+moves[idx].in_use = 0;
               }
             }
 
@@ -1074,7 +1025,9 @@ int add_recursive_watches(int inotify_fd, const char *dir_path,
   char full_path[MAX_PATH_LEN];
   int errors = 0;
 
-  int wd = inotify_add_watch(inotify_fd, dir_path, WATCH_MASK);
+  int wd = inotify_add_watch(inotify_fd, dir_path,
+                             IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM |
+                                 IN_MOVED_TO);
   if (wd >= 0) {
     if (*watch_count < MAX_WATCHES) {
       watches[*watch_count].wd = wd;
@@ -1142,7 +1095,7 @@ int end_backup(const char *source, char targets[][MAX_PATH_LEN],
       }
 
       if (found_idx < 0) {
-        continue;
+        continue; 
       }
 
       stopped_any = 1;
@@ -1257,8 +1210,7 @@ int sync_directories(const char *backup_dir, const char *original_dir) {
       if (!path_exists(original_path) ||
           !files_are_same(backup_path, original_path)) {
         printf("Restoring: %s\n", original_path);
-        if (copy_file(backup_path, original_path, backup_dir, original_dir) !=
-            0) {
+        if (copy_file(backup_path, original_path, backup_dir, original_dir) != 0) {
           printf("Warning: Failed to restore file %s\n", original_path);
         }
       }
