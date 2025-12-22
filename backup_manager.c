@@ -700,24 +700,28 @@ int create_backup(const char *source, char targets[][MAX_PATH_LEN],
     backup->target_paths[i][MAX_PATH_LEN - 1] = '\0';
   }
 
-  printf("Creating initial backup...\n");
-  for (int i = 0; i < target_count; i++) {
-    printf("Copying to %s...\n", targets[i]);
-    if (copy_directory_recursive(source, targets[i], source, targets[i]) != 0) {
-      printf("Error: Failed to create backup in %s\n", targets[i]);
-      return -1;
-    }
-  }
-
   for (int i = 0; i < target_count; i++) {
     pid_t pid = fork();
     if (pid == 0) {
+      printf("Creating initial backup: %s -> %s (PID: %d)\n", source,
+             targets[i], getpid());
+
+      if (copy_directory_recursive(source, targets[i], source, targets[i]) !=
+          0) {
+        printf("Error: Failed to create initial backup in %s\n", targets[i]);
+        exit(1);
+      }
+
       monitor_directory(source, targets[i]);
       exit(0);
     } else if (pid > 0) {
       backup->monitor_pids[i] = pid;
     } else {
       perror("fork");
+      for (int j = 0; j < i; j++) {
+        kill(backup->monitor_pids[j], SIGTERM);
+        waitpid(backup->monitor_pids[j], NULL, 0);
+      }
       return -1;
     }
   }
@@ -988,41 +992,61 @@ int add_recursive_watches(int inotify_fd, const char *dir_path,
 int end_backup(const char *source, char targets[][MAX_PATH_LEN],
                int target_count) {
   for (int i = 0; i < backup_count; i++) {
-    if (strcmp(active_backups[i].source_path, source) == 0) {
-      int matches = 0;
-      for (int j = 0; j < active_backups[i].target_count; j++) {
-        for (int k = 0; k < target_count; k++) {
-          if (strcmp(active_backups[i].target_paths[j], targets[k]) == 0) {
-            matches++;
-            break;
-          }
-        }
-      }
-
-      if (matches == target_count &&
-          matches == active_backups[i].target_count) {
-        for (int j = 0; j < active_backups[i].target_count; j++) {
-          pid_t pid = active_backups[i].monitor_pids[j];
-          if (kill(pid, SIGTERM) != 0) {
-            printf("Warning: Failed to terminate monitoring process %d: %s\n",
-                   pid, strerror(errno));
-          } else {
-            int status;
-            if (waitpid(pid, &status, 0) < 0) {
-              printf("Warning: Failed to wait for process %d: %s\n", pid,
-                     strerror(errno));
-            }
-          }
-        }
-
-        for (int j = i; j < backup_count - 1; j++) {
-          active_backups[j] = active_backups[j + 1];
-        }
-        backup_count--;
-
-        return 0;
-      }
+    if (strcmp(active_backups[i].source_path, source) != 0) {
+      continue;
     }
+
+    int stopped_any = 0;
+
+    for (int k = 0; k < target_count; k++) {
+      int found_idx = -1;
+      for (int j = 0; j < active_backups[i].target_count; j++) {
+        if (strcmp(active_backups[i].target_paths[j], targets[k]) == 0) {
+          found_idx = j;
+          break;
+        }
+      }
+
+      if (found_idx < 0) {
+        continue;
+      }
+
+      stopped_any = 1;
+
+      pid_t pid = active_backups[i].monitor_pids[found_idx];
+      if (kill(pid, SIGTERM) != 0) {
+        printf("Warning: Failed to terminate monitoring process %d: %s\n", pid,
+               strerror(errno));
+      } else {
+        int status;
+        if (waitpid(pid, &status, 0) < 0) {
+          printf("Warning: Failed to wait for process %d: %s\n", pid,
+                 strerror(errno));
+        }
+      }
+
+      for (int j = found_idx; j < active_backups[i].target_count - 1; j++) {
+        strncpy(active_backups[i].target_paths[j],
+                active_backups[i].target_paths[j + 1], MAX_PATH_LEN - 1);
+        active_backups[i].target_paths[j][MAX_PATH_LEN - 1] = '\0';
+        active_backups[i].monitor_pids[j] =
+            active_backups[i].monitor_pids[j + 1];
+      }
+      active_backups[i].target_count--;
+    }
+
+    if (!stopped_any) {
+      printf("Error: No matching backup found\n");
+      return -1;
+    }
+
+    if (active_backups[i].target_count == 0) {
+      for (int j = i; j < backup_count - 1; j++) {
+        active_backups[j] = active_backups[j + 1];
+      }
+      backup_count--;
+    }
+    return 0;
   }
 
   printf("Error: No matching backup found\n");
